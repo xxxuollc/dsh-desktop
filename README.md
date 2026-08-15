@@ -1,81 +1,111 @@
 # DSH Desktop
 
-将 DSH Web 界面（http://127.0.0.1:3080）封装为 macOS 桌面应用的 Electron 壳。
+把 DSH（DeepSeek Harness）Web 界面封装成 **macOS 桌面应用**：常驻 Dock、双击即用、自动拉起服务。
 
-## 功能
+**它是什么**：一个 Electron「壳」。真正干活的是 DSH 服务端（npm 包 `@deepseek-ai/dsh`），
+桌面应用负责：检测/启动服务 → 打开界面 → 管理服务生命周期。
 
-- 常驻 **Dock**：点 Dock 图标显示/恢复窗口；关闭窗口只是隐藏，Cmd+Q 才退出
-- **自动拉起服务**：启动时检测端口（默认 3080），无响应则自动运行 `dsh --profile web` 并等待就绪；服务已运行则直接连接
-- **服务生命周期管理**：只有“本应用拉起”的服务会在退出时被回收；你手动启动的服务不受影响
-- 服务意外退出时弹出提示，可一键重试
+---
 
-## 使用
+## 快速开始（普通用户，推荐）
+
+> 只需要两步：**下载 .app** + **装 dsh**。**不需要**去 GitHub 拉任何源码。
+
+**前置要求**：已安装 [Node.js](https://nodejs.org/)（LTS 即可）。
+
+1. **下载应用**：到 [Releases](https://github.com/xxxuollc/dsh-desktop/releases) 下载对应架构的 zip
+   - Apple Silicon（M1/M2/M3/M4…）→ `DSH Desktop-darwin-arm64.zip`
+   - Intel → `DSH Desktop-darwin-x64.zip`
+2. **安装**：解压，把 `DSH Desktop.app` 拖进「应用程序」。
+   首次打开如被 Gatekeeper 拦截：右键 → 打开 → 确认打开
+3. **安装 DSH 服务端**（打开「终端」执行一条命令）：
+   ```bash
+   npm install -g @deepseek-ai/dsh
+   ```
+4. **启动应用**：双击 DSH Desktop。它会自动：
+   - 检测 `http://127.0.0.1:3080` 是否有服务在跑 → 没有就自动运行 `dsh --profile web` 拉起（首次会自动初始化）
+   - 等服务就绪 → 自动打开界面
+5. **首次使用**：在界面里配置模型/API 凭据（设置页）
+
+> 打不开？看菜单「DSH Desktop → 查看服务日志」；或确认 `dsh` 命令在终端里 `command -v dsh` 有输出。
+
+---
+
+## 原理（它到底在做什么）
+
+```
+┌─────────────── DSH Desktop（Electron 壳）───────────────┐
+│  启动 → 检查 3080 端口                                    │
+│    ├─ 已有服务在跑 → 直接连接（不重复启动）                 │
+│    └─ 没服务 → spawn `dsh --profile web`（自动拉起）        │
+│         → 轮询等就绪 → 加载 http://127.0.0.1:3080          │
+│  退出 → 只回收"由本应用启动"的服务，手动启动的不动           │
+└──────────────────────────────────────────────────────────┘
+```
+
+- **DSH 服务端 ≠ 源码**：`dsh` 是 npm 包 `@deepseek-ai/dsh` 提供的命令行工具（公开包，`npm install -g` 即装）。
+  应用启动时按以下顺序查找 `dsh`：
+  1. 配置文件 `config.json` 里手动指定的 `dshBin`
+  2. npx 缓存（`~/.npm/_npx/*/node_modules/.bin/dsh`）
+  3. PATH（`command -v dsh`，覆盖 npm 全局安装 / nvm / volta / Homebrew 等）
+  4. 常见固定路径（`/opt/homebrew/bin`、`/usr/local/bin`、`/usr/bin`）
+- **首次运行自动初始化**：`dsh --profile web` 首次启动会从内置模板自动创建 profile，无需手动配置
+- **配置文件**（首次运行自动生成）`~/Library/Application Support/DSH Desktop/config.json`：
+  ```json
+  { "port": 3080, "workspaceDir": "/Users/<你>", "dshBin": "" }
+  ```
+  菜单「DSH Desktop → 打开配置文件 / 查看服务日志」可快速定位
+- **工作目录**（`workspaceDir`）= agent 的工作区根目录；不存在时会自动回退到主目录并提示
+
+---
+
+## 修改 DSH 框架源码（开发者）
+
+桌面应用只是启动器，框架代码在 `@deepseek-ai/dsh` 包（或其依赖的 `@deepseek-ai/dsh-*` 插件包）里。
+改完**重启应用**即生效（应用每次启动都会重新拉起服务）。
+
+- **只改配置/开关插件（不动源码）**：编辑 `~/.dsh/cordis.patch.yml`（home 级补丁层，可覆盖/禁用/插入插件配置）
+- **改框架源码**：
+  1. `git clone https://github.com/deepseek-ai/deepseek-harness`
+  2. 修改 TS 源码 → 按仓库文档构建出 `dsh` 可执行文件
+  3. 把 `config.json` 的 `dshBin` 指向构建产物 → 应用自动改用你的定制版
+
+---
+
+## 从源码构建（开发者）
 
 ```bash
-npm install          # 安装依赖（如遇 ~/.npm 权限问题，用 --cache 指定项目内缓存）
-npm run icon         # 生成图标（可选，assets/icon.png 已生成）
-npm run dist         # 打包 .app → dist/mac*/DSH Desktop.app
-npm run dist:dmg     # 打包 .app + dmg 安装镜像
+npm install          # 安装依赖（electron + electron-builder）
+npm run icon         # 生成图标（assets/icon.png）
+npm run dist         # 打包 .app → dist/mac-arm64/（本机架构）
+npm run dist:dmg     # 额外生成 dmg 安装镜像
+npm start            # 开发模式直接运行（需 dsh 可用）
 ```
 
-打包后把 `DSH Desktop.app` 拖进「应用程序」即可，或：
+## GitHub Actions 自动发布
 
-```bash
-ditto "dist/mac-arm64/DSH Desktop.app" "/Applications/DSH Desktop.app"
-```
+推送 `v*` 格式的 tag（如 `v1.0.1`）自动触发 [.github/workflows/release.yml](.github/workflows/release.yml)：
+macOS runner 上 `npm ci` → 生成图标 → `electron-builder` 打出 **arm64 + x64** 双架构 → 压缩 → 发布 Release。
 
-> 注：打包产物在 `dist/mac-arm64/`（Apple Silicon）。应用未做代码签名，仅本地使用无碍；
-> 若要分发给别人，需要 Developer ID 证书后再打包。
+## 配置项一览
 
-## Releases（GitHub Actions 自动构建）
+| 键 | 默认 | 说明 |
+|---|---|---|
+| `port` | `3080` | DSH 服务端口 |
+| `workspaceDir` | 主目录 | 服务工作目录（agent 工作区根目录） |
+| `dshBin` | 自动查找 | dsh 可执行文件路径（留空自动查找） |
 
-推送形如 `v1.0.0` 的 tag 会自动触发 [`.github/workflows/release.yml`](.github/workflows/release.yml)：
+覆盖优先级（高→低）：`Resources/dev-config.json`（调试）> 命令行参数 > 环境变量 > `config.json` > 默认值。
 
-1. 在 macOS runner 上 `npm ci` + 生成图标 + `electron-builder` 打出 **arm64 / x64 两个架构**的 `.app`
-2. 压缩为 `DSH Desktop-darwin-arm64.zip` / `DSH Desktop-darwin-x64.zip`
-3. 发布为 GitHub Release（含自动生成的更新说明）
+## 开发细节
 
-下载对应架构的 zip 解压后拖进「应用程序」即可。
-
-> 未签名应用首次打开会被 Gatekeeper 拦截：右键 → 打开 → 确认。若要让别人无感安装，需要
-> Developer ID 证书并在工作流中开启 `CSC_LINK` / `CSC_KEY_PASSWORD` 签名。
-
-## 配置
-
-首次运行自动生成 `~/Library/Application Support/DSH Desktop/config.json`：
-
-```json
-{
-  "port": 3080,
-  "workspaceDir": "/Users/<你>/Documents/Herness Space",
-  "dshBin": ""
-}
-```
-
-- `port`：DSH 服务端口（默认 3080）
-- `workspaceDir`：服务工作目录（即 agent 的工作区根目录）
-- `dshBin`：dsh 可执行文件路径；留空时自动在 `~/.npm/_npx/*/node_modules/.bin/dsh` 中查找最新的
-
-菜单栏「DSH Desktop → 打开配置文件 / 查看服务日志」可快速定位。
-
-覆盖优先级（高→低）：`Resources/dev-config.json` > 命令行参数 > 环境变量 > `config.json` > 默认值。
-
-- 测试用环境变量：`DSH_DESKTOP_PORT` / `DSH_DESKTOP_WORKSPACE` / `DSH_DESKTOP_DSH_BIN`
-- 命令行参数（直接执行二进制时）：`--dsh-port=3099` / `--dsh-workspace=...` / `--dsh-home=...`
-- 调试覆盖文件：应用包内 `Contents/Resources/dev-config.json`，`{"port": 3099, "home": "/tmp/...", "workspaceDir": "..."}`。
-  因 macOS `open --args` 不会把参数传给 Electron 应用，调试时把该文件写进包内即可注入配置。
-
-## 开发
-
-- `npm start`：以开发模式运行（需先手动启动 DSH 服务或依赖自动拉起）
-- `scripts/test-server-start.sh`：在隔离的 `DSH_HOME` 下验证 `dsh --profile web` 自动启动路径（端口 3099，不影响线上服务）
-- `scripts/gen-icon.js`：纯 Node 生成 1024x1024 占位图标（节点图风格，备用）
-- `scripts/make-whale-svg.js` + `scripts/gen-whale-icon.js`：从 DSH 官方 `favicon.svg` 提取鲸鱼路径，
-  纯 Node 扫描线光栅化（8x 超采样 + even-odd）合成「浅色圆角底 + 黑鲸」→ `assets/icon.png`（素材 `assets/icon-whale.svg`）
 - 日志：`~/Library/Application Support/DSH Desktop/app.log`（应用主进程）、`server.log`（dsh 服务）
-- 构建缓存位于项目内 `.npm-cache` / `.electron-cache` / `.builder-cache`（沙箱/权限原因未用系统缓存），确认不需要重新打包时可删除，下次构建会重新下载
+- `scripts/test-server-start.sh`：隔离 `DSH_HOME` 下验证 `dsh --profile web` 自动启动路径（端口 3099，不影响线上服务）
+- `scripts/gen-icon.js`：纯 Node 生成占位图标（备用）
+- `scripts/make-whale-svg.js` + `scripts/gen-whale-icon.js`：从 DSH 官方 `favicon.svg` 提取鲸鱼路径，
+  纯 Node 扫描线光栅化（8x 超采样 + even-odd）合成「浅色圆角底 + 黑鲸」→ `assets/icon.png`
+- 构建缓存位于项目内 `.electron-cache` 等（沙箱/权限原因未用系统缓存），不需要重新打包时可删除
 
 ## 致谢
 
-- 应用图标中的鲸鱼图案取自 **DeepSeek Harness** 官方 `favicon.svg`（© DeepSeek），
-  仅供个人使用，请勿用于商业用途。
+- 应用图标中的鲸鱼图案取自 **DeepSeek Harness** 官方 `favicon.svg`（© DeepSeek），仅供个人使用，请勿用于商业用途。

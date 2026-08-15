@@ -3,14 +3,14 @@
 'use strict';
 
 const { app, BrowserWindow, Menu, dialog, shell } = require('electron');
-const { spawn } = require('child_process');
+const { spawn, execFileSync } = require('child_process');
 const fs = require('fs');
 const os = require('os');
 const path = require('path');
 const http = require('http');
 
 const DEFAULT_PORT = 3080;
-const DEFAULT_WORKSPACE = path.join(os.homedir(), 'Documents', 'Herness Space');
+const DEFAULT_WORKSPACE = os.homedir(); // 新用户默认主目录；可通过配置文件修改
 const POLL_INTERVAL_MS = 700;
 const START_TIMEOUT_MS = 30_000;
 
@@ -84,7 +84,7 @@ function loadConfig() {
 // ── 定位 dsh 可执行文件 ─────────────────────────────────────────────────────
 function findDshBin(configured) {
   if (configured && fs.existsSync(configured)) return configured;
-  // npx 缓存：~/.npm/_npx/<hash>/node_modules/.bin/dsh，取最新的一个
+  // 1) npx 缓存：~/.npm/_npx/<hash>/node_modules/.bin/dsh，取最新的一个
   const npxRoot = path.join(os.homedir(), '.npm', '_npx');
   try {
     const dirs = fs.readdirSync(npxRoot)
@@ -93,7 +93,14 @@ function findDshBin(configured) {
       .sort((a, b) => fs.statSync(b).mtimeMs - fs.statSync(a).mtimeMs);
     if (dirs.length) return dirs[0];
   } catch { /* 目录不存在时忽略 */ }
-  // 兜底：PATH 常见位置
+  // 2) PATH 查找：登录 shell 加载用户的完整 PATH（覆盖 npm 全局安装 / nvm / volta 等）
+  try {
+    const found = execFileSync('/bin/sh', ['-lc', 'command -v dsh'], {
+      encoding: 'utf8', timeout: 10000,
+    }).trim().split('\n')[0];
+    if (found && fs.existsSync(found)) return found;
+  } catch { /* 不在 PATH 中 */ }
+  // 3) 兜底：常见固定路径
   const candidates = ['/opt/homebrew/bin/dsh', '/usr/local/bin/dsh', '/usr/bin/dsh'];
   for (const c of candidates) if (fs.existsSync(c)) return c;
   return null;
@@ -228,18 +235,25 @@ async function bootstrapServer() {
       type: 'error',
       title: '找不到 dsh',
       message: '未找到 dsh 可执行文件，无法自动启动 DSH 服务。',
-      detail: `请先通过 npx @deepseek-ai/dsh 启动过服务，或在配置文件中设置 dshBin 路径。\n配置文件：${path.join(app.getPath('userData'), 'config.json')}`,
+      detail: `请先安装 DSH 服务端（需要 Node.js）：\n\n` +
+        `  方式一（推荐）：npm install -g @deepseek-ai/dsh\n` +
+        `  方式二：npx -y @deepseek-ai/dsh --profile web\n\n` +
+        `安装后重新打开应用即可；也可在配置文件中手动指定 dshBin 路径。\n` +
+        `配置文件：${path.join(app.getPath('userData'), 'config.json')}`,
     });
     return false;
   }
 
-  if (!fs.existsSync(workspaceDir)) {
+  let ws = workspaceDir;
+  if (!fs.existsSync(ws)) {
+    ws = os.homedir();
+    log('[bootstrap] 工作目录不存在，回退到主目录:', workspaceDir, '->', ws);
     dialog.showMessageBox({
-      type: 'error',
+      type: 'warning',
       title: '工作目录不存在',
       message: `配置的工作目录不存在：${workspaceDir}`,
+      detail: `已临时改用主目录：${ws}\n可在菜单「DSH Desktop → 打开配置文件」中修改 workspaceDir。`,
     });
-    return false;
   }
 
   if (await isServerUp(port)) {
@@ -249,7 +263,7 @@ async function bootstrapServer() {
   log('[bootstrap] 端口空闲，开始自动拉起服务');
 
   updateLoading(`正在启动 DSH 服务（端口 ${port}）…`);
-  startDshServer(port, workspaceDir, dshBin);
+  startDshServer(port, ws, dshBin);
   const ok = await waitForServer(port, START_TIMEOUT_MS);
   log('[bootstrap] 等待服务就绪结果=', ok);
   if (!ok) {
