@@ -1,0 +1,42 @@
+#!/usr/bin/expect -f
+# 驱动 gh auth login 设备码流程（状态机，按任意顺序处理提示）
+set timeout 600
+log_user 1
+
+spawn gh auth login --web --git-protocol https --hostname github.com
+
+set done 0
+while {!$done} {
+  expect {
+    -re "Authenticate Git with your GitHub credentials" {
+      send "\r"
+      puts "\n>>>STEP<<< git-credentials-confirmed"
+    }
+    -re "one-time code: (\[A-Z0-9\]*-\[A-Z0-9\]*)" {
+      puts "\n>>>DEVICE_CODE<<< $expect_out(1,string) >>>END_CODE<<<"
+    }
+    "Press Enter" {
+      send "\r"
+      puts "\n>>>STEP<<< enter-sent-browser-open"
+    }
+    -re "Logged in as (\\S+)" {
+      puts "\n>>>LOGIN_OK<<< $expect_out(1,string)"
+      set done 1
+    }
+    -re "already logged in as (\\S+)" {
+      puts "\n>>>LOGIN_OK<<< $expect_out(1,string)"
+      set done 1
+    }
+    eof {
+      puts "\n>>>EOF<<<"
+      set done 1
+    }
+    timeout {
+      puts "\n>>>TIMEOUT<<<"
+      set done 1
+    }
+  }
+}
+
+catch { expect eof }
+exit 0
