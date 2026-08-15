@@ -1,0 +1,45 @@
+name: Build Release
+
+# 推送形如 v1.0.0 的 tag 时，自动在 macOS 上构建 .app 并发布 Release
+on:
+  push:
+    tags:
+      - 'v*'
+
+permissions:
+  contents: write
+
+jobs:
+  build:
+    runs-on: macos-13
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+
+      - name: Setup Node
+        uses: actions/setup-node@v4
+        with:
+          node-version: 22
+          cache: npm
+
+      - name: Install dependencies
+        run: npm ci
+
+      - name: Generate icon
+        run: npm run icon
+
+      - name: Build .app (arm64 + x64)
+        run: npx electron-builder --mac dir --arm64 --x64
+
+      - name: Package zip artifacts
+        run: |
+          cd dist
+          ditto -c -k --sequesterRsrc --keepParent "mac-arm64/DSH Desktop.app" "DSH Desktop-darwin-arm64.zip"
+          ditto -c -k --sequesterRsrc --keepParent "mac/DSH Desktop.app" "DSH Desktop-darwin-x64.zip"
+
+      - name: Create GitHub Release
+        uses: softprops/action-gh-release@v2
+        with:
+          files: |
+            dist/*.zip
+          generate_release_notes: true

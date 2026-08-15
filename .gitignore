@@ -1,0 +1,15 @@
+# 依赖与构建产物
+node_modules/
+dist/
+.electron-cache/
+.npm-cache/
+.builder-cache/
+
+# macOS
+.DS_Store
+
+# 日志
+*.log
+
+# 本地调试覆盖（不要提交）
+dev-config.json
