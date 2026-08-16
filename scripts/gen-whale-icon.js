@@ -225,6 +225,38 @@ function compose(whaleAlpha, bbox) {
   return out;
 }
 
+// ── 全出血图标（iOS 用：铺满画布，无圆角蒙版，系统会自动加圆角）──────────────
+function composeFullBleed(whaleAlpha, bbox) {
+  const W = 1024;
+  const out = Buffer.alloc(W * W * 4);
+  const targetW = W * 0.62;
+  const scale = targetW / (bbox.maxX - bbox.minX);
+  const ww = (bbox.maxX - bbox.minX) * scale;
+  const wh = (bbox.maxY - bbox.minY) * scale;
+  const ox = (W - ww) / 2 - bbox.minX * scale;
+  const oy = (W - wh) / 2 - 0.02 * W - bbox.minY * scale;
+
+  for (let py = 0; py < W; py++) {
+    for (let px = 0; px < W; px++) {
+      const t = py / W;
+      let r = 255 + (230 - 255) * t;
+      let g = 255 + (236 - 255) * t;
+      let b = 255 + (245 - 255) * t;
+      const sx = (px - ox) / scale;
+      const sy = (py - oy) / scale;
+      if (sx >= 0 && sy >= 0 && sx < W && sy < W) {
+        const a = whaleAlpha[Math.floor(sy) * W + Math.floor(sx)];
+        if (a > 0.004) {
+          r *= 1 - a; g *= 1 - a; b *= 1 - a;
+        }
+      }
+      const o = (py * W + px) * 4;
+      out[o] = Math.round(r); out[o + 1] = Math.round(g); out[o + 2] = Math.round(b); out[o + 3] = 255;
+    }
+  }
+  return out;
+}
+
 // ── PNG 编码（与 gen-icon.js 相同）──────────────────────────────────────────
 const crcTable = (() => {
   const t = new Uint32Array(256);
@@ -333,3 +365,10 @@ const trayPng = encodePNG(TS, TS, tray);
 const trayOut = path.join(__dirname, '..', 'assets', 'tray.png');
 fs.writeFileSync(trayOut, trayPng);
 console.log(`已生成 ${trayOut}（${(trayPng.length / 1024).toFixed(1)} KB）`);
+
+// ── iOS 全出血图标（1024）───────────────────────────────────────────────────
+const fbRgba = composeFullBleed(alpha, bbox);
+const fbPng = encodePNG(SIZE, SIZE, fbRgba);
+const fbOut = path.join(__dirname, '..', 'assets', 'icon-fullbleed.png');
+fs.writeFileSync(fbOut, fbPng);
+console.log(`已生成 ${fbOut}（${(fbPng.length / 1024).toFixed(1)} KB）`);

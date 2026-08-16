@@ -75,6 +75,11 @@
 - 手机相机扫码 → 首次访问种下 HttpOnly cookie → 之后同源请求自动放行
 - 面板可查看/复制/重置令牌
 
+### iPhone 原生 App（DSH Mobile）
+
+不想用 Safari？仓库带完整的 **iOS 原生工程**（扫码连接、独立 App、与桌面完全一致的界面、双向同步）：
+构建与安装见 [`ios/README-ios.md`](ios/README-ios.md)（需 Xcode + 免费 Apple ID，iOS 18+）。
+
 ### 安全设计（重要）
 
 - **不触碰框架的 `--host 0.0.0.0` 禁令**：DSH 服务端始终只绑定 `127.0.0.1`
