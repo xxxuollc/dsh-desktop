@@ -8,6 +8,7 @@
 
 const http = require('http');
 const crypto = require('crypto');
+const { buildInjection } = require('./lan-inject.js');
 
 const FORBIDDEN_HTML = `<!DOCTYPE html><html lang="zh-CN"><head><meta charset="utf-8"><title>拒绝访问</title>
 <style>body{font-family:-apple-system,'PingFang SC',sans-serif;background:#0b0d14;color:#e2e8f0;display:flex;align-items:center;justify-content:center;height:100vh;margin:0}div{text-align:center}.code{font-size:64px;color:#f87171;font-weight:700}.msg{color:#94a3b8;margin-top:12px}</style></head>
@@ -70,9 +71,42 @@ function createLanProxy({ port, upstreamPort = 3080, token, onLog = () => {} }) 
       log(`${req.method} ${forwardPath} → ${proxyRes.statusCode} (${client})`);
       const resHeaders = { ...proxyRes.headers };
       if (setCookie) resHeaders['set-cookie'] = (resHeaders['set-cookie'] || []).concat(setCookie);
-      delete resHeaders['content-length']; // 流式转发
-      res.writeHead(proxyRes.statusCode, resHeaders);
-      proxyRes.pipe(res);
+      const ctype = String(proxyRes.headers['content-type'] || '');
+      if (ctype.includes('text/html') && proxyRes.statusCode === 200) {
+        // HTML 强制 no-store：注入层随版本变化，不能让 WKWebView 用旧页面
+        resHeaders['cache-control'] = 'no-store';
+        // 注入客户端增强层（randomUUID 补丁 + 移动端适配）
+        const chunks = [];
+        proxyRes.on('data', (c) => chunks.push(c));
+        proxyRes.on('end', () => {
+          let html = Buffer.concat(chunks).toString('utf8');
+          if (!html.includes('dsh-lan-polyfill') || !html.includes('dsh-mobile-layer')) {
+            html = html.replace(/<head[^>]*>/i, (m) => m + buildInjection());
+          }
+          delete resHeaders['content-length'];
+          res.writeHead(proxyRes.statusCode, resHeaders);
+          res.end(html);
+        });
+        proxyRes.on('error', () => res.destroy());
+      } else if (ctype.includes('text/event-stream')) {
+        // SSE 流：注入心跳注释行（SSE 标准，客户端忽略 `:` 行），防止 iOS/网络
+        // 把空闲连接掐断——手机事件流之前每 15~30s 掉线，消息不同步+审批卡片收不到。
+        res.writeHead(proxyRes.statusCode, resHeaders);
+        const heartbeat = setInterval(() => {
+          if (!res.writableEnded) res.write(': dsh-ping\n\n');
+        }, 10000);
+        proxyRes.on('data', (c) => { if (!res.writableEnded) res.write(c); });
+        proxyRes.on('end', () => { clearInterval(heartbeat); if (!res.writableEnded) res.end(); });
+        proxyRes.on('error', () => { clearInterval(heartbeat); res.destroy(); });
+        // 客户端断开 → 回收上游连接（防泄漏）
+        res.on('close', () => { clearInterval(heartbeat); proxyRes.destroy(); });
+      } else {
+        delete resHeaders['content-length']; // 流式转发
+        res.writeHead(proxyRes.statusCode, resHeaders);
+        proxyRes.pipe(res);
+        // 客户端断开 → 回收上游连接（防泄漏）
+        res.on('close', () => proxyRes.destroy());
+      }
     });
 
     proxyReq.on('error', (err) => {

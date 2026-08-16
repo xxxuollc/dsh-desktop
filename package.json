@@ -26,6 +26,7 @@
       "lan-panel.js",
       "preload.js",
       "lan-proxy.js",
+      "lan-inject.js",
       "assets/**"
     ],
     "directories": {

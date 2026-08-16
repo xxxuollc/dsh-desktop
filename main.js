@@ -226,6 +226,9 @@ function createWindow() {
 
   mainWindow.once('ready-to-show', () => mainWindow.show());
 
+  // 白屏自愈：页面 JS 崩溃（整页变白）时自动重新加载，避免"只能关掉重启"
+  watchForBlank(mainWindow);
+
   // 关闭窗口 = 隐藏（应用继续常驻 Dock），Cmd+Q 才真正退出
   mainWindow.on('close', (e) => {
     if (!isQuitting) {
@@ -250,6 +253,67 @@ function toggleWindow() {
   } else {
     showWindow();
   }
+}
+
+// ── 白屏自愈 + 崩溃取证 ─────────────────────────────────────────────────────
+// DSH 客户端偶发 JS 崩溃导致整页白屏（浏览器里刷新可恢复）。壳层兜底：
+// 1) 页面 console 报"未捕获异常"→ 记日志（取证）+ 自动 reload（20s 退避防循环）
+// 2) body 空置连续两轮（约 6s）→ 自动 reload（覆盖无 console 输出的崩溃）
+// 3) 渲染进程被杀 → 延迟重载一次
+let blankCount = 0
+let lastAutoReloadAt = 0
+
+function autoReload(win, reason) {
+  if (Date.now() - lastAutoReloadAt < 20000) return false
+  lastAutoReloadAt = Date.now()
+  log(`[watch] ${reason}，自动重新加载页面`)
+  setTimeout(() => {
+    if (!win.isDestroyed() && !win.webContents.isDestroyed()) win.webContents.reload()
+  }, 800)
+  return true
+}
+
+function watchForBlank(win) {
+  // 崩溃取证 + 即时自愈：React 未捕获异常必然打到 console
+  win.webContents.on('console-message', (event, level, message) => {
+    const msg = typeof event === 'object' && event.message !== undefined ? String(event.message) : String(message ?? '')
+    const lvl = typeof event === 'object' && event.level !== undefined ? event.level : level
+    if (lvl === 'error' || lvl === 3) {
+      log('[page-err]', msg.slice(0, 600))
+      if (/uncaught|above error occurred|maximum update|is not a function|undefined is not|cannot read propert|invalid hook|key=|minified react error/i.test(msg)) {
+        autoReload(win, '页面 JS 崩溃')
+      }
+    }
+  })
+
+  const checker = setInterval(async () => {
+    if (!win || win.isDestroyed()) { clearInterval(checker); return }
+    const wc = win.webContents
+    if (!wc.getURL().startsWith('http://')) return // 只盯 DSH 页面，不盯加载页
+    let empty = false
+    try {
+      empty = await wc.executeJavaScript(
+        `(() => { const b = document.body; if (!b) return true; ` +
+        `const t = (b.innerText || '').trim(); return t.length === 0 && b.children.length <= 1; })()`
+      )
+    } catch { return }
+    if (empty) {
+      blankCount += 1
+      if (blankCount >= 2) {
+        blankCount = 0
+        autoReload(win, '检测到页面空白')
+      }
+    } else {
+      blankCount = 0
+    }
+  }, 3000)
+  win.on('closed', () => clearInterval(checker))
+
+  // 渲染进程被杀（崩溃/内存不足）：延迟重载一次
+  win.webContents.on('render-process-gone', (_e, details) => {
+    log('[watch] 渲染进程退出:', details.reason)
+    autoReload(win, '渲染进程退出')
+  })
 }
 
 // ── 局域网访问（壳内令牌代理，转发到本机 127.0.0.1:port）──────────────────
@@ -466,7 +530,7 @@ async function bootstrapServer() {
 function updateLoading(text) {
   if (mainWindow && !mainWindow.isDestroyed()) {
     mainWindow.webContents.executeJavaScript(
-      `document.getElementById('status').textContent = ${JSON.stringify(text)}`
+      `(() => { const el = document.getElementById('status'); if (el) el.textContent = ${JSON.stringify(text)}; })()`
     ).catch(() => {});
   }
 }
