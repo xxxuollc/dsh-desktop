@@ -287,8 +287,7 @@ function stopLanProxy() {
     try { lanProxy.close(); } catch { /* 已关闭 */ }
     lanProxy = null;
   }
-  appConfig.lanEnabled = false;
-  persistConfig();
+  // 注意：退出时停止代理但不改 appConfig.lanEnabled（那是用户偏好，需持久化保留）
   log('[lan] 代理已停止');
 }
 
@@ -298,6 +297,8 @@ async function setLanEnabled(on) {
     return { enabled: ok && appConfig.lanEnabled, error: ok ? '' : '启动失败', port: appConfig.lanPort };
   }
   stopLanProxy();
+  appConfig.lanEnabled = false; // 只有用户显式关闭才持久化
+  persistConfig();
   return { enabled: false, error: '', port: appConfig.lanPort };
 }
 
@@ -359,16 +360,23 @@ function openLanPanel() {
 }
 
 function registerIpc() {
-  ipcMain.handle('lan:state', () => ({
-    enabled: !!appConfig.lanEnabled,
-    port: appConfig.lanPort,
-    token: appConfig.lanToken,
-  }));
+  ipcMain.handle('lan:state', () => {
+    log('[面板] lan:state 被调用');
+    return {
+      enabled: !!appConfig.lanEnabled,
+      port: appConfig.lanPort,
+      token: appConfig.lanToken,
+    };
+  });
   ipcMain.handle('lan:setEnabled', async (_e, on) => {
+    log('[面板] lan:setEnabled =', on);
     const r = await setLanEnabled(!!on);
     return { ...r, token: appConfig.lanToken };
   });
-  ipcMain.handle('lan:addresses', () => buildLanAddresses());
+  ipcMain.handle('lan:addresses', () => {
+    log('[面板] lan:addresses 被调用（构建二维码）');
+    return buildLanAddresses();
+  });
   ipcMain.handle('lan:regenerateToken', async () => {
     appConfig.lanToken = randomToken();
     persistConfig();

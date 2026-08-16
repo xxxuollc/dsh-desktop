@@ -23,6 +23,7 @@
       "main.js",
       "loading.html",
       "lan-panel.html",
+      "lan-panel.js",
       "preload.js",
       "lan-proxy.js",
       "assets/**"
