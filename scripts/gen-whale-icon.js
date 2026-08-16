@@ -312,3 +312,24 @@ const png = encodePNG(SIZE, SIZE, rgba);
 const out = path.join(__dirname, '..', 'assets', 'icon.png');
 fs.writeFileSync(out, png);
 console.log(`已生成 ${out}（${(png.length / 1024).toFixed(1)} KB）`);
+
+// ── 托盘图标：32x32 黑鲸（透明底，macOS 菜单栏 template 图）──────────────────
+const TS = 32;
+const tray = Buffer.alloc(TS * TS * 4);
+for (let y = 0; y < TS; y++) {
+  for (let x = 0; x < TS; x++) {
+    let sum = 0;
+    for (let dy = 0; dy < 32; dy++) {
+      for (let dx = 0; dx < 32; dx++) {
+        sum += alpha[(y * 32 + dy) * SIZE + (x * 32 + dx)];
+      }
+    }
+    const a = Math.round((sum / 1024) * 255);
+    const i = (y * TS + x) * 4;
+    tray[i] = 0; tray[i + 1] = 0; tray[i + 2] = 0; tray[i + 3] = a;
+  }
+}
+const trayPng = encodePNG(TS, TS, tray);
+const trayOut = path.join(__dirname, '..', 'assets', 'tray.png');
+fs.writeFileSync(trayOut, trayPng);
+console.log(`已生成 ${trayOut}（${(trayPng.length / 1024).toFixed(1)} KB）`);

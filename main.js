@@ -2,19 +2,25 @@
 // 功能：常驻 Dock；启动时检测 3080 端口，未响应则自动拉起 dsh 服务；退出时回收由本应用启动的服务。
 'use strict';
 
-const { app, BrowserWindow, Menu, dialog, shell } = require('electron');
+const { app, BrowserWindow, Menu, dialog, shell, globalShortcut, Tray, nativeImage, ipcMain } = require('electron');
 const { spawn, execFileSync } = require('child_process');
 const fs = require('fs');
 const os = require('os');
 const path = require('path');
 const http = require('http');
+const QRCode = require('qrcode');
+const { createLanProxy, randomToken } = require('./lan-proxy');
 
 const DEFAULT_PORT = 3080;
 const DEFAULT_WORKSPACE = os.homedir(); // 新用户默认主目录；可通过配置文件修改
+const DEFAULT_LAN_PORT = 3082;          // 局域网代理端口（令牌门禁，转发到 3080）
 const POLL_INTERVAL_MS = 700;
 const START_TIMEOUT_MS = 30_000;
 
 let mainWindow = null;
+let lanPanel = null;
+let tray = null;
+let lanProxy = null; // 局域网代理 server
 let serverChild = null; // 本应用拉起的 dsh 进程
 let serverStartedByUs = false;
 let isQuitting = false;
@@ -52,6 +58,9 @@ function loadConfig() {
     port: parseInt(argvValue('dsh-port') || process.env.DSH_DESKTOP_PORT, 10) || file.port || DEFAULT_PORT,
     workspaceDir: argvValue('dsh-workspace') || process.env.DSH_DESKTOP_WORKSPACE || file.workspaceDir || DEFAULT_WORKSPACE,
     dshBin: process.env.DSH_DESKTOP_DSH_BIN || file.dshBin || '',
+    lanEnabled: !!file.lanEnabled,
+    lanPort: file.lanPort || DEFAULT_LAN_PORT,
+    lanToken: file.lanToken || '',
   };
   const homeOverride = argvValue('dsh-home');
   if (homeOverride) process.env.DSH_HOME = homeOverride; // 测试隔离用
@@ -63,22 +72,34 @@ function loadConfig() {
       if (dev.port) cfg.port = dev.port;
       if (dev.workspaceDir) cfg.workspaceDir = dev.workspaceDir;
       if (dev.dshBin) cfg.dshBin = dev.dshBin;
+      if (dev.lanEnabled !== undefined) cfg.lanEnabled = !!dev.lanEnabled;
+      if (dev.lanPort) cfg.lanPort = dev.lanPort;
+      if (dev.lanToken) cfg.lanToken = dev.lanToken;
       if (dev.home) process.env.DSH_HOME = dev.home;
       log('[main] 应用调试覆盖 dev-config:', JSON.stringify(dev));
     }
   } catch (e) {
     log('[main] dev-config 读取失败:', e.message);
   }
-  // 首次运行：写入默认配置，方便用户日后修改
-  if (!fs.existsSync(configPath)) {
-    try {
-      fs.mkdirSync(path.dirname(configPath), { recursive: true });
-      fs.writeFileSync(configPath, JSON.stringify(cfg, null, 2));
-    } catch (e) {
-      console.error('无法写入配置文件：', e.message);
-    }
+  // 补写缺失的配置键（升级后老配置文件没有新键）
+  const merged = { ...file, ...cfg };
+  try {
+    fs.mkdirSync(path.dirname(configPath), { recursive: true });
+    fs.writeFileSync(configPath, JSON.stringify(merged, null, 2));
+  } catch (e) {
+    console.error('无法写入配置文件：', e.message);
   }
   return cfg;
+}
+
+function persistConfig() {
+  const configPath = path.join(app.getPath('userData'), 'config.json');
+  try {
+    fs.mkdirSync(path.dirname(configPath), { recursive: true });
+    fs.writeFileSync(configPath, JSON.stringify(appConfig, null, 2));
+  } catch (e) {
+    log('[config] 写入失败:', e.message);
+  }
 }
 
 // ── 定位 dsh 可执行文件 ─────────────────────────────────────────────────────
@@ -223,6 +244,162 @@ function showWindow() {
   mainWindow.focus();
 }
 
+function toggleWindow() {
+  if (mainWindow && !mainWindow.isDestroyed() && mainWindow.isVisible() && mainWindow.isFocused()) {
+    mainWindow.hide();
+  } else {
+    showWindow();
+  }
+}
+
+// ── 局域网访问（壳内令牌代理，转发到本机 127.0.0.1:port）──────────────────
+async function startLanProxy() {
+  if (lanProxy) return true;
+  if (!appConfig.lanToken) appConfig.lanToken = randomToken();
+  try {
+    const { server } = await createLanProxy({
+      port: appConfig.lanPort,
+      upstreamPort: appConfig.port,
+      token: appConfig.lanToken,
+      onLog: (m) => log(m),
+    });
+    lanProxy = server;
+    appConfig.lanEnabled = true;
+    persistConfig();
+    log('[lan] 代理已启动 0.0.0.0:' + appConfig.lanPort);
+    return true;
+  } catch (err) {
+    log('[lan] 代理启动失败:', err.message);
+    if (err.code === 'EADDRINUSE') {
+      dialog.showMessageBox(lanPanel, {
+        type: 'error',
+        title: '端口被占用',
+        message: `局域网端口 ${appConfig.lanPort} 已被占用。`,
+        detail: '可在配置文件 config.json 中修改 lanPort。',
+      });
+    }
+    return false;
+  }
+}
+
+function stopLanProxy() {
+  if (lanProxy) {
+    try { lanProxy.close(); } catch { /* 已关闭 */ }
+    lanProxy = null;
+  }
+  appConfig.lanEnabled = false;
+  persistConfig();
+  log('[lan] 代理已停止');
+}
+
+async function setLanEnabled(on) {
+  if (on) {
+    const ok = await startLanProxy();
+    return { enabled: ok && appConfig.lanEnabled, error: ok ? '' : '启动失败', port: appConfig.lanPort };
+  }
+  stopLanProxy();
+  return { enabled: false, error: '', port: appConfig.lanPort };
+}
+
+function lanAddresses() {
+  const addrs = [];
+  const ifaces = os.networkInterfaces();
+  for (const name of Object.keys(ifaces)) {
+    for (const iface of ifaces[name]) {
+      if (iface.family === 'IPv4' && !iface.internal) {
+        addrs.push(iface.address);
+      }
+    }
+  }
+  return [...new Set(addrs)];
+}
+
+async function buildLanAddresses() {
+  const token = appConfig.lanToken || '';
+  const out = [];
+  for (const ip of lanAddresses()) {
+    const url = `http://${ip}:${appConfig.lanPort}/?token=${encodeURIComponent(token)}`;
+    try {
+      const qr = await QRCode.toDataURL(url, { margin: 1, width: 240, color: { dark: '#000000', light: '#ffffff' } });
+      out.push({ ip, url, qr });
+    } catch (e) {
+      log('[lan] 二维码生成失败:', e.message);
+    }
+  }
+  return out;
+}
+
+// ── 局域网面板窗口 ──────────────────────────────────────────────────────────
+function openLanPanel() {
+  if (lanPanel && !lanPanel.isDestroyed()) {
+    lanPanel.show();
+    lanPanel.focus();
+    return;
+  }
+  lanPanel = new BrowserWindow({
+    width: 430,
+    height: 660,
+    resizable: false,
+    minimizable: false,
+    maximizable: false,
+    fullscreenable: false,
+    title: '局域网访问',
+    backgroundColor: '#0b0d14',
+    show: false,
+    webPreferences: {
+      preload: path.join(__dirname, 'preload.js'),
+      contextIsolation: true,
+      nodeIntegration: false,
+      sandbox: true,
+    },
+  });
+  lanPanel.loadFile(path.join(__dirname, 'lan-panel.html'));
+  lanPanel.once('ready-to-show', () => lanPanel.show());
+  lanPanel.on('closed', () => { lanPanel = null; });
+}
+
+function registerIpc() {
+  ipcMain.handle('lan:state', () => ({
+    enabled: !!appConfig.lanEnabled,
+    port: appConfig.lanPort,
+    token: appConfig.lanToken,
+  }));
+  ipcMain.handle('lan:setEnabled', async (_e, on) => {
+    const r = await setLanEnabled(!!on);
+    return { ...r, token: appConfig.lanToken };
+  });
+  ipcMain.handle('lan:addresses', () => buildLanAddresses());
+  ipcMain.handle('lan:regenerateToken', async () => {
+    appConfig.lanToken = randomToken();
+    persistConfig();
+    return { token: appConfig.lanToken };
+  });
+  ipcMain.handle('lan:close', () => {
+    if (lanPanel && !lanPanel.isDestroyed()) lanPanel.close();
+  });
+}
+
+// ── 托盘 + 全局快捷键 ───────────────────────────────────────────────────────
+function createTray() {
+  const img = nativeImage.createFromPath(path.join(__dirname, 'assets', 'tray.png'));
+  img.setTemplateImage(true);
+  tray = new Tray(img);
+  tray.setToolTip('DSH Desktop');
+  tray.setContextMenu(Menu.buildFromTemplate([
+    { label: '显示/隐藏窗口', click: () => toggleWindow() },
+    { type: 'separator' },
+    { label: '局域网访问…', click: () => openLanPanel() },
+    { type: 'separator' },
+    { label: '退出 DSH Desktop', click: () => app.quit() },
+  ]));
+  tray.on('click', () => toggleWindow());
+}
+
+function registerShortcuts() {
+  const ok = globalShortcut.register('CommandOrControl+Shift+D', () => showWindow());
+  log('[main] 全局快捷键 Cmd/Ctrl+Shift+D 注册', ok ? '成功' : '失败');
+}
+
 // ── 启动流程 ────────────────────────────────────────────────────────────────
 async function bootstrapServer() {
   const { port, workspaceDir, dshBin: configuredBin } = appConfig;
@@ -305,7 +482,11 @@ if (!gotLock) {
   app.whenReady().then(() => {
     log('[main] argv=', JSON.stringify(process.argv));
     appConfig = loadConfig();
-    log('[main] 配置已加载 port=', appConfig.port, 'workspace=', appConfig.workspaceDir);
+    log('[main] 配置已加载 port=', appConfig.port, 'workspace=', appConfig.workspaceDir, 'lanEnabled=', appConfig.lanEnabled);
+
+    registerIpc();
+    createTray();
+    registerShortcuts();
 
     const template = [
       {
@@ -313,6 +494,7 @@ if (!gotLock) {
         submenu: [
           { role: 'about' },
           { type: 'separator' },
+          { label: '局域网访问…', accelerator: 'CmdOrCtrl+Shift+L', click: () => openLanPanel() },
           { label: '打开配置文件', click: () => shell.openPath(path.join(app.getPath('userData'), 'config.json')) },
           { label: '查看服务日志', click: () => shell.openPath(path.join(app.getPath('userData'), 'server.log')) },
           { type: 'separator' },
@@ -354,14 +536,29 @@ if (!gotLock) {
 
     createWindow();
     openApp();
+
+    // 若上次退出时开启了局域网访问，恢复代理
+    if (appConfig.lanEnabled) {
+      startLanProxy().then((ok) => {
+        log('[main] 恢复局域网代理:', ok ? '成功' : '失败');
+        if (!ok) dialog.showMessageBox(mainWindow, {
+          type: 'warning',
+          title: '局域网访问未恢复',
+          message: `上次启用的局域网访问未能启动（端口 ${appConfig.lanPort}）。`,
+          detail: '可打开「DSH Desktop → 局域网访问…」查看状态。',
+        });
+      });
+    }
   });
 
   // macOS：点 Dock 图标重新显示窗口
   app.on('activate', () => showWindow());
 
-  // 退出前回收由本应用启动的服务
+  // 退出前回收由本应用启动的服务 + 关闭局域网代理 + 注销快捷键
   app.on('before-quit', () => {
     isQuitting = true;
     stopDshServer();
+    stopLanProxy();
+    globalShortcut.unregisterAll();
   });
 }
