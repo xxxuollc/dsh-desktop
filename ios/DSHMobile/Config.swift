@@ -1,11 +1,15 @@
 import Foundation
 import Combine
 
-/// 连接配置：Mac 上 DSH Desktop 的局域网地址 + 访问令牌
+/// 连接配置：默认直连云端 DSH（mini 的隧道域名），打开即用
 struct AppConfig: Codable, Equatable {
-    var serverURL: String = ""   // 例: http://192.168.3.100:3082
-    var token: String = ""
+    var serverURL: String = DEFAULT_SERVER
+    var token: String = DEFAULT_TOKEN
 }
+
+/// 默认服务器（mini 的 Cloudflare 隧道）+ 访问令牌
+let DEFAULT_SERVER = "https://dsh.assayer.top"
+let DEFAULT_TOKEN = "teYJpAWtRZLJcVKHc3ptIw"
 
 /// 配置存储（UserDefaults），全局共享
 final class ConfigStore: ObservableObject {
@@ -15,7 +19,8 @@ final class ConfigStore: ObservableObject {
         didSet { save() }
     }
 
-    private let key = "dsh.config.v1"
+    // v2：默认值改为云端域名；v1 里的旧局域网地址不再读取
+    private let key = "dsh.config.v2"
 
     private init() {
         if let data = UserDefaults.standard.data(forKey: key),
