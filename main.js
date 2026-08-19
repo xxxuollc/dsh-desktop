@@ -61,6 +61,9 @@ function loadConfig() {
     lanEnabled: !!file.lanEnabled,
     lanPort: file.lanPort || DEFAULT_LAN_PORT,
     lanToken: file.lanToken || '',
+    // 远程模式：设置后本机不再启动 DSH 服务，窗口直接连接远程地址（如 mini 的隧道）
+    remoteUrl: file.remoteUrl || '',
+    remoteToken: file.remoteToken || '',
   };
   const homeOverride = argvValue('dsh-home');
   if (homeOverride) process.env.DSH_HOME = homeOverride; // 测试隔离用
@@ -72,6 +75,8 @@ function loadConfig() {
       if (dev.port) cfg.port = dev.port;
       if (dev.workspaceDir) cfg.workspaceDir = dev.workspaceDir;
       if (dev.dshBin) cfg.dshBin = dev.dshBin;
+      if (dev.remoteUrl) cfg.remoteUrl = dev.remoteUrl;
+      if (dev.remoteToken) cfg.remoteToken = dev.remoteToken;
       if (dev.lanEnabled !== undefined) cfg.lanEnabled = !!dev.lanEnabled;
       if (dev.lanPort) cfg.lanPort = dev.lanPort;
       if (dev.lanToken) cfg.lanToken = dev.lanToken;
@@ -100,6 +105,17 @@ function persistConfig() {
   } catch (e) {
     log('[config] 写入失败:', e.message);
   }
+}
+
+// ── 内置运行时（零依赖安装）──────────────────────────────────────────────────
+// 安装包携带 Node 二进制 + dsh 全家桶（Resources/runtime/），用户无需装 Node/npm。
+function bundledRuntime() {
+  const nodeBin = path.join(process.resourcesPath, 'runtime', 'node', 'node');
+  const dshEntry = path.join(process.resourcesPath, 'runtime', 'dsh', 'node_modules', '@deepseek-ai', 'dsh', 'lib', 'bin.js');
+  if (fs.existsSync(nodeBin) && fs.existsSync(dshEntry)) {
+    return { nodeBin, dshEntry };
+  }
+  return null;
 }
 
 // ── 定位 dsh 可执行文件 ─────────────────────────────────────────────────────
@@ -152,6 +168,7 @@ function waitForServer(port, timeoutMs) {
 }
 
 // ── 启动 DSH 服务 ───────────────────────────────────────────────────────────
+// dshBin 为空时使用内置运行时（零依赖：随包 node + dsh，无需用户安装）
 function startDshServer(port, workspaceDir, dshBin) {
   const logPath = path.join(app.getPath('userData'), 'server.log');
   const logFd = fs.openSync(logPath, 'a');
@@ -162,8 +179,18 @@ function startDshServer(port, workspaceDir, dshBin) {
     PATH: `${process.env.PATH || ''}${path.delimiter}${extraPath}`,
   };
   const args = ['--profile', 'web', '--port', String(port)];
-  log('[spawn]', dshBin, args.join(' '), 'cwd=', workspaceDir);
-  serverChild = spawn(dshBin, args, {
+  const bundled = bundledRuntime();
+  let command, spawnArgs;
+  if (bundled) {
+    command = bundled.nodeBin;
+    spawnArgs = [bundled.dshEntry, ...args];
+    log('[spawn] 使用内置运行时:', bundled.nodeBin, bundled.dshEntry, args.join(' '), 'cwd=', workspaceDir);
+  } else {
+    command = dshBin;
+    spawnArgs = args;
+    log('[spawn]', dshBin, args.join(' '), 'cwd=', workspaceDir);
+  }
+  serverChild = spawn(command, spawnArgs, {
     cwd: workspaceDir,
     detached: true, // 独立进程组，退出时可整组回收
     env,
@@ -289,7 +316,7 @@ function watchForBlank(win) {
   const checker = setInterval(async () => {
     if (!win || win.isDestroyed()) { clearInterval(checker); return }
     const wc = win.webContents
-    if (!wc.getURL().startsWith('http://')) return // 只盯 DSH 页面，不盯加载页
+    if (!/^https?:/.test(wc.getURL())) return // 只盯 DSH 页面（http/https），不盯加载页
     let empty = false
     try {
       empty = await wc.executeJavaScript(
@@ -476,10 +503,11 @@ function registerShortcuts() {
 async function bootstrapServer() {
   const { port, workspaceDir, dshBin: configuredBin } = appConfig;
   const dshBin = findDshBin(configuredBin);
-  log('[bootstrap] port=', port, 'workspace=', workspaceDir, 'dshBin=', dshBin || '(null)');
+  const bundled = bundledRuntime();
+  log('[bootstrap] port=', port, 'workspace=', workspaceDir, 'dshBin=', dshBin || '(null)', 'bundled=', bundled ? 'yes' : 'no');
 
-  if (!dshBin) {
-    log('[bootstrap] 找不到 dsh 可执行文件');
+  if (!dshBin && !bundled) {
+    log('[bootstrap] 找不到 dsh 且无内置运行时');
     dialog.showMessageBox({
       type: 'error',
       title: '找不到 dsh',
@@ -536,10 +564,19 @@ function updateLoading(text) {
 }
 
 async function openApp() {
+  // 远程模式：不启动本地服务，直接连接远程 DSH（如 mini 的隧道）
+  const { remoteUrl, remoteToken, port } = appConfig;
+  if (remoteUrl) {
+    const sep = remoteUrl.includes('?') ? '&' : '?';
+    const url = remoteToken ? `${remoteUrl}${sep}token=${encodeURIComponent(remoteToken)}` : remoteUrl;
+    updateLoading('正在连接远程 DSH…');
+    log('[openApp] 远程模式 →', url);
+    mainWindow.loadURL(url);
+    return;
+  }
   const ok = await bootstrapServer();
   if (!ok) { log('[openApp] bootstrap 失败，停留加载页'); return; }
   updateLoading('服务已就绪，正在打开界面…');
-  const { port } = appConfig;
   log('[openApp] 加载界面 http://127.0.0.1:' + port);
   mainWindow.loadURL(`http://127.0.0.1:${port}`);
 }

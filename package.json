@@ -1,7 +1,7 @@
 {
   "name": "dsh-desktop",
   "productName": "DSH Desktop",
-  "version": "1.1.0",
+  "version": "1.1.1",
   "description": "将 DSH Web 界面封装为 macOS 桌面应用（常驻 Dock，自动拉起 DSH 服务）",
   "main": "main.js",
   "author": "xuquanke",
@@ -27,7 +27,8 @@
       "preload.js",
       "lan-proxy.js",
       "lan-inject.js",
-      "assets/**"
+      "assets/**",
+      "runtime/**"
     ],
     "directories": {
       "output": "dist",
